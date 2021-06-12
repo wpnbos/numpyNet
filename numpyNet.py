@@ -564,7 +564,7 @@ model.add(activation_sigmoid())
 # Set loss, optimizer and accuracy objects
 model.set(
     loss=loss_binarycrossentropy(),
-    optimizer=optimizer_adam(decay=5e-7),
+    optimizer=optimizer_rprop(),
     accuracy=Accuracy_Categorical(binary=True)
 )
 
