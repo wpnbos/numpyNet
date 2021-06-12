@@ -15,7 +15,7 @@ class layer_input:
 
 class layer_dense:
 	def __init__(self, n_inputs, n_neurons, L1_w=0, L1_b=0, L2_w=0, L2_b=0):
-		self.weights = 0.1 * np.random.randn(n_inputs, n_neurons)
+		self.weights = 0.01 * np.random.randn(n_inputs, n_neurons)
 		self.biases = np.zeros((1, n_neurons))
 		self.L1_w = L1_w
 		self.L1_b = L1_b
@@ -82,6 +82,9 @@ class activation_softmax:
 			jacobian_matrix = np.diagflat(single_output) - np.dot(single_output, single_output.T)
 			self.d_inputs[index] = np.dot(jacobian_matrix, single_dvalues)
 
+	def predictions(self, outputs):
+		return np.argmax(outputs, axis=1)
+
 class activation_sigmoid():
 	def forward(self, inputs):
 		self.inputs = inputs
@@ -89,6 +92,9 @@ class activation_sigmoid():
 
 	def backward(self, dvalues):
 		self.d_inputs = dvalues * (1 - self.output) * self.output
+
+	def predictions(self, outputs):
+		return (outputs > 0.5) * 1
 			
 class activation_linear:
 	def forward(self, inputs):
@@ -98,22 +104,35 @@ class activation_linear:
 	def backward(self, dvalues):
 		self.d_inputs = dvalues.copy()
 
+	def predictions(self, outputs):
+		return outputs
+
 class loss():
-	def calculate(self, output, y):
+	def calculate(self, output, y, *, include_regularization=False):
 		sample_losses = self.forward(output, y)
 		data_loss = np.mean(sample_losses)
-		return data_loss
-	def regularization_loss(self, layer):
+
+		if not include_regularization:
+			return data_loss
+
+		return data_loss, self.regularization_loss()
+
+	def remember_trainable_layers(self, trainable_layers):
+		self.trainable_layers = trainable_layers
+
+	def regularization_loss(self):
 		regularization_loss = 0
 
-		if layer.L1_w > 0: 
-			regularization_loss += layer.L1_w * np.sum(np.abs(layer.weights))
-		if layer.L1_b > 0: 
-			regularization_loss += layer.L1_b * np.sum(np.abs(layer.biases))
-		if layer.L2_w > 0: 
-			regularization_loss += layer.L2_w * np.sum(np.abs(layer.weights))			
-		if layer.L2_b > 0: 
-			regularization_loss += layer.L2_b * np.sum(np.abs(layer.biases))
+		for layer in self.trainable_layers: 
+
+			if layer.L1_w > 0: 
+				regularization_loss += layer.L1_w * np.sum(np.abs(layer.weights))
+			if layer.L1_b > 0: 
+				regularization_loss += layer.L1_b * np.sum(np.abs(layer.biases))
+			if layer.L2_w > 0: 
+				regularization_loss += layer.L2_w * np.sum(layer.biases * layer.biases)			
+			if layer.L2_b > 0: 
+				regularization_loss += layer.L2_b * np.sum(layer.biases * layer.biases)
 
 		return regularization_loss
 
@@ -371,6 +390,54 @@ class optimizer_adam:
 	def post_update_params(self):
 		self.iterations += 1
 
+class Accuracy: 
+
+	def calculate(self, predictions, y):
+
+		comparisons = self.compare(predictions, y)
+
+		accuracy = np.mean(comparisons)
+
+		return accuracy 
+
+class Accuracy_Regression(Accuracy):
+
+    def __init__(self):
+        # Create precision property
+        self.precision = None
+
+    # Calculates precision value
+    # based on passed in ground truth
+    def init(self, y, reinit=False):
+        if self.precision is None or reinit:
+            self.precision = np.std(y) / 250
+
+    # Compares predictions to the ground truth values
+    def compare(self, predictions, y):
+        return np.absolute(predictions - y) < self.precision
+
+class Accuracy_Categorical(Accuracy):
+
+    def __init__(self, *, binary=False):
+        # Binary mode?
+        self.binary = binary
+
+    # No initialization is needed
+    def init(self, y):
+        pass
+
+    # Compares predictions to the ground truth values
+    def compare(self, predictions, y):
+        if not self.binary and len(y.shape) == 2:
+            y = np.argmax(y, axis=1)
+        return predictions == y
+
+class Layer_Input:
+
+	def forward(self, inputs): 
+		self.output = inputs
+
+
 class model:
 	def __init__(self):
 		self.layers = []
@@ -378,26 +445,132 @@ class model:
 	def add(self, layer):
 		self.layers.append(layer)
 
-	def set(self, *, loss, optimizer):
+	def set(self, *, loss, optimizer, accuracy):
 		self.loss = loss
 		self.optimizer = optimizer 
+		self.accuracy = accuracy
 
-	def train(self, X, y, *, epochs = 1, print_every=1):
+	def finalize(self):
+
+		#create input layer
+		self.input_layer = Layer_Input()
+
+		#count layer objects 
+		layer_count = len(self.layers)
+
+		self.trainable_layers = []
+
+		#iterate over layer objects
+		for i in range(layer_count):
+			#for the first layer, the previous layer is the dummy input layer
+
+			if i == 0: 
+				self.layers[i].prev = self.input_layer
+				self.layers[i].next = self.layers[i+1]
+
+			elif i < layer_count - 1:
+				self.layers[i].prev = self.layers[i-1]
+				self.layers[i].next = self.layers[i+1]
+
+			#this is for the final layer
+			else: 
+				self.layers[i].prev = self.layers[i-1]
+				self.layers[i].next = self.loss
+				self.output_layer_activation = self.layers[i]
+
+			if hasattr(self.layers[i], "weights"):
+				self.trainable_layers.append(self.layers[i])
+
+		self.loss.remember_trainable_layers(self.trainable_layers)
+
+	def forward(self, X):
+
+		self.input_layer.forward(X)
+
+		for layer in self.layers: 
+			layer.forward(layer.prev.output)
+
+		return layer.output
+
+	def backward(self, output, y):
+		self.loss.backward(output, y)
+
+		for layer in reversed(self.layers):
+			layer.backward(layer.next.d_inputs)
+
+	def train(self, X, y, *, epochs = 1, print_every=1, validation_data = None):
+
+		self.accuracy.init(y)
+
 		for epoch in range(1, epochs+1):
-			pass
 
+			output = self.forward(X)
 
-X, y = sine_data()
+			data_loss, regularization_loss = self.loss.calculate(output, y, include_regularization=True)
+			loss = data_loss + regularization_loss
 
+			predictions = self.output_layer_activation.predictions(output)
+			accuracy = self.accuracy.calculate(predictions, y)
+
+			self.backward(output, y)
+
+			self.optimizer.pre_update_params()
+			for layer in self.trainable_layers:
+				self.optimizer.update_params(layer)
+			self.optimizer.post_update_params()
+
+			if not epoch % print_every:
+				print(f'epoch: {epoch}, ' +
+					f'acc: {accuracy:.3f}, ' +
+					f'loss: {loss:.3f} (' +
+					f'data_loss: {data_loss:.3f}, ' +
+					f'reg_loss: {regularization_loss:.3f}), ' +
+					f'lr: {self.optimizer.current_learning_rate}')
+
+		if validation_data is not None:
+
+			X_val, y_val = validation_data
+
+			output = self.forward(X_val)
+
+			loss = self.loss.calculate(output, y_val)
+
+			predictions = self.output_layer_activation.predictions(output)
+			accuracy = self.accuracy.calculate(predictions, y_val)
+			print(f'validation, ' +
+				f'acc: {accuracy:.3f}, ' +
+				f'loss: {loss:.3f}')
+
+# Create train and test dataset
+X, y = spiral_data(samples=100, classes=2)
+X_test, y_test = spiral_data(samples=100, classes=2)
+
+# Reshape labels to be a list of lists
+# Inner list contains one output (either 0 or 1)
+# per each output neuron, 1 in this case
+y = y.reshape(-1, 1)
+y_test = y_test.reshape(-1, 1)
+
+# Instantiate the model
 model = model()
 
-model.add(layer_dense(1, 64))
-model.add(activation_ReLU())
-model.add(layer_dense(64, 64))
+# Add layers
+model.add(layer_dense(2, 64, L2_w=5e-4,
+                             L2_b=5e-4))
 model.add(activation_ReLU())
 model.add(layer_dense(64, 1))
-model.add(activation_linear())
+model.add(activation_sigmoid())
 
-model.set(loss = loss_meansquarederror(), optimizer=optimizer_adam(learning_rate=0.005, decay=1e-3))
+# Set loss, optimizer and accuracy objects
+model.set(
+    loss=loss_binarycrossentropy(),
+    optimizer=optimizer_adam(decay=5e-7),
+    accuracy=Accuracy_Categorical(binary=True)
+)
 
-model.train(X, y, epochs = 10000, print_every=100)
+# Finalize the model
+model.finalize()
+
+# Train the model
+model.train(X, y, validation_data=(X_test, y_test),
+            epochs=10000, print_every=100)
